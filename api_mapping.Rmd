@@ -1,0 +1,157 @@
+---
+title: "Untitled"
+author: "Claire Meuter"
+date: "2023-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(jsonlite)
+library(here)
+library(sf)
+library(terra)
+library(rnaturalearth)
+```
+
+## Accessing IUCN API
+
+- first: add API key to .Renviron and why do it this way?
+    - in console: `usethis::edit_r_environ()`
+    - add line with a useful recognizable name and your API key
+    - e.g., `IUCN_KEY=12345678`
+- second: accessing API key
+    - now in your code, you can access this key with `api_key <- Sys.getenv('IUCN_KEY')`
+- if no personal API key yet, use the API demo one: 
+    - 9bb4facb6d23f48efbf424bb05c0c1ef1cf6f468393bc745d42179ac4aca5fee
+
+```{r}
+api_key <- "9bb4facb6d23f48efbf424bb05c0c1ef1cf6f468393bc745d42179ac4aca5fee"
+```
+
+
+#access APi dataset version
+```{r}
+domain_name <- 'http://apiv3.iucnredlist.org' #putting in the domain to access the data 
+version_end <- "api/v3/version"
+
+version_url <- file.path(domain_name, version_end) #stitching these together into a web address
+
+api_version <- jsonlite::fromJSON(version_url)
+
+```
+## how many species are in the ICUN dataset? 
+
+```{r}
+count_stem <- 'api/v3/speciescount?token=%s' #%s is where I can substitute a string
+
+count_end <- sprintf(count_stem, api_key)
+
+count_url <- file.path(domain_name, count_end)
+
+spp_count <- jsonlite::fromJSON(count_url)
+
+as.integer(spp_count$count) #Gives us the count of the species 
+```
+
+##get a page of results 
+```{r}
+page_stem <- "api/v3/species/page/%s?token=%s"
+page_end <- sprintf(page_stem, 1, api_key)
+
+page_url <- file.path(domain_name, page_end)
+
+spp_page1 <- fromJSON(page_url)
+
+spp_df <- spp_page1$result %>% 
+  mutate(category = factor(category, levels = c('LC', 'NT', 'VU', 'EN', 'CR', 'EX'))) %>% 
+  filter(!is.na(category))
+
+ggplot(spp_df) +
+  geom_bar(aes(x = category, fill = category)) +
+  scale_fill_brewer(palette = 'RdYlGn', direction = -1) + theme_minimal()
+```
+
+
+## get current and historical assesment information for particular species 
+```{r}
+hist_stem <- 'api/v3/species/history/name/%s?token=%s'
+spp <- "Dermochelys%20coriacea" #leatherback turtle %20 tells web this is a space. Same as putting a space in 
+
+hist_end <- sprintf(hist_stem, spp, api_key)
+
+hist_url <- file.path(domain_name, hist_end)
+
+spp_hist <- fromJSON(hist_url)
+
+spp_hist_df <- spp_hist$result
+
+### this is as far as we got in lab-- more can be done later on my own. 
+```
+
+
+### Map threatened species 
+```{r}
+#loading in species info 
+iucn_spp_info <- read_csv(here('data/iucn_marine_spp_info_2021-3.csv'))
+
+iucn_spp_info$cat %>% unique() #to see the types of categories
+
+cell_ids <- read_csv(here('data/am_latlong.csv')) 
+spp_cells <- read_csv(here('data/am_spp_cells.csv'))
+spp_ids <- read_csv(here('data/am_spp_ids.csv')) #match up species id to name 
+#we want to combine these ci]olumns in a meaningful way so that we can map them to lat and long 
+
+spp_risk_cells <- spp_cells %>% 
+  inner_join(cell_ids, by = 'loiczid') %>% 
+  inner_join(spp_ids, by = "am_sid") %>% 
+  inner_join(iucn_spp_info, by=c('binomial' = 'sciname'))
+
+threaten_pct_cells <- spp_risk_cells %>% 
+  filter(prob >= 0.5) %>% 
+  mutate(threatened = (tolower(cat) %in% c('vu','en','cr'))) %>% 
+  filter(cat != 'dd') %>% 
+  group_by(lon, lat) %>% 
+  summarize(pct_threatened = sum(threatened)/n())
+#now we can turn this into a raster 
+
+```
+#making this data a raster 
+```{r}
+spp_risk_rast <- terra::rast(threaten_pct_cells, type = "xyz", crs = "epsg:4326")
+
+plot(spp_risk_rast)
+
+
+```
+## now we'll plot with ggplot 
+```{r}
+#showing how to easily make a df from raster
+spp_rast_df <- spp_risk_rast %>% 
+  as.data.frame(xy = TRUE)
+
+
+p <- ggplot(threaten_pct_cells) +
+  geom_raster(aes(x = lon, y = lat, fill = pct_threatened)) +
+  scale_fill_viridis_c() +
+  coord_sf()
+p
+
+```
+## make it fancy 
+```{r}
+land_sf <- rnaturalearth::ne_countries(scale = 50, 
+                                       country = c("united states of america", 'mexico'),
+                                       returnclass = "sf")
+
+land_sf_cropped <- land_sf %>% 
+  st_crop(spp_risk_rast)
+
+p2 <- p + 
+  geom_sf(data = land_sf_cropped,
+          fill = 'grey80', color = 'red', alpha = .5) + theme_void()
+
+p2
+```
+
